@@ -30,10 +30,6 @@ type Manager struct {
 	networkId [4]byte
 	nodeId    [2]byte
 
-	// wgPort uint16
-	// wgPrivateKey wgtypes.Key
-	// bgpRrPassword string
-
 	wait      sync.WaitGroup
 	closeOnce sync.Once
 	closeCh   chan struct{}
@@ -151,10 +147,6 @@ func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerP
 		networkId: *(*[4]byte)(unsafe.Pointer(&networkIdBytes[0])),
 		nodeId:    *(*[2]byte)(unsafe.Pointer(&nodeIdBytes[0])),
 
-		// wgPort:       wgPort,
-		// wgPrivateKey: wgKey,
-		// bgpRrPassword: controllerPassword,
-
 		closeCh: make(chan struct{}),
 	}
 
@@ -165,12 +157,6 @@ func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerP
 		m.Close()
 		return nil, fmt.Errorf("start bgp server: %w", err)
 	}
-
-	// err = m.presetBgpDefined()
-	// if err != nil {
-	// 	m.Close()
-	// 	return nil, fmt.Errorf("preset bgp defined: %w", err)
-	// }
 
 	err = m.startWireGuardInterface(wgPrivateKey, wgPort)
 	if err != nil {
@@ -270,87 +256,6 @@ func (m *Manager) startBgpServer() error {
 
 	return nil
 }
-
-// TODO: Since no route server is being used, the neighbor rib method cannot be employed.
-// We'll temporarily avoid using this method.
-//
-// func (m *Manager) presetBgpDefined() error {
-// 	err := m.bgpServer.AddDefinedSet(context.Background(), &apipb.AddDefinedSetRequest{
-// 		DefinedSet: &apipb.DefinedSet{
-// 			DefinedType: apipb.DefinedType_PREFIX,
-// 			Name:        _bgpPrefixName_Reserved,
-// 			Prefixes: []*apipb.Prefix{
-// 				{
-// 					IpPrefix:      _reservedPrefix.String(),
-// 					MaskLengthMin: uint32(_reservedPrefix.Bits()),
-// 					MaskLengthMax: uint32(_reservedPrefix.Addr().BitLen()),
-// 				},
-// 			},
-// 		},
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("add defined set reserved prefix: %w", err)
-// 	}
-
-// 	err = m.bgpServer.AddDefinedSet(context.Background(), &apipb.AddDefinedSetRequest{
-// 		DefinedSet: &apipb.DefinedSet{
-// 			DefinedType: apipb.DefinedType_COMMUNITY,
-// 			Name:        _bgpCommunityName_WireGuardPeer,
-// 			List:        []string{fmt.Sprintf("%d:%d", _bgpCommunity_WireGuardPeer>>16, _bgpCommunity_WireGuardPeer&0xffff)},
-// 		},
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("add defined set wireguard peer community: %w", err)
-// 	}
-
-// 	err = m.bgpServer.AddDefinedSet(context.Background(), &apipb.AddDefinedSetRequest{
-// 		DefinedSet: &apipb.DefinedSet{
-// 			DefinedType: apipb.DefinedType_COMMUNITY,
-// 			Name:        _bgpCommunityName_GenericPeer,
-// 			List:        []string{fmt.Sprintf("%d:%d", _bgpCommunity_GenericPeer>>16, _bgpCommunity_GenericPeer&0xffff)},
-// 		},
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("add defined set generic peer community: %w", err)
-// 	}
-
-// 	err = m.bgpServer.AddPolicy(context.Background(), &apipb.AddPolicyRequest{
-// 		Policy: &apipb.Policy{
-// 			Name: _bgpPolicyName_AcceptWireGuardPeer,
-// 			Statements: []*apipb.Statement{
-// 				{
-// 					Name: "only-accept-bgp-reserved-prefix",
-// 					Conditions: &apipb.Conditions{
-// 						PrefixSet: &apipb.MatchSet{
-// 							Type: apipb.MatchSet_ANY,
-// 							Name: _bgpPrefixName_Reserved,
-// 						},
-// 					},
-// 					Actions: &apipb.Actions{
-// 						RouteAction: apipb.RouteAction_ACCEPT,
-// 					},
-// 				},
-// 				{
-// 					Name: "only-accept-bgp-community-wireguard-peer",
-// 					Conditions: &apipb.Conditions{
-// 						CommunitySet: &apipb.MatchSet{
-// 							Type: apipb.MatchSet_ANY,
-// 							Name: _bgpCommunityName_WireGuardPeer,
-// 						},
-// 					},
-// 					Actions: &apipb.Actions{
-// 						RouteAction: apipb.RouteAction_ACCEPT,
-// 					},
-// 				},
-// 			},
-// 		},
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("add policy accept wireguard peer: %w", err)
-// 	}
-
-// 	return nil
-// }
 
 func (m *Manager) addControllerPeer(addr netip.Addr, port uint16, password string) error {
 	err := m.bgpServer.AddPeer(context.Background(), &apipb.AddPeerRequest{

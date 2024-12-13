@@ -17,11 +17,4 @@ const (
 
 	_bgpCommunity_WireGuardPeer = uint32(_asn)<<16 | 0x0001
 	_bgpCommunity_GenericPeer   = uint32(_asn)<<16 | 0x0002
-
-	_bgpCommunityName_WireGuardPeer = "wireguard-peer"
-	_bgpCommunityName_GenericPeer   = "generic-peer"
-
-	_bgpPrefixName_Reserved = "reserved-prefix"
-
-	_bgpPolicyName_AcceptWireGuardPeer = "accept-wireguard-peer"
 )

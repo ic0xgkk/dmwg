@@ -67,13 +67,6 @@ func (m *Manager) handleWireGuardPeerEvents(resp *apipb.WatchEventResponse) {
 			continue
 		}
 
-		// If only UseMultiplePaths is enabled, then `p.Best` will be set.
-		// Since it's not enabled in this case, there's no need to check for `p.Best`.
-		// if !p.Best {
-		// 	glog.V(5).Infof("handle wireguard peer event dropped by not best")
-		// 	continue
-		// }
-
 		if p.IsNexthopInvalid {
 			glog.V(5).Infof("handle wireguard peer event dropped by invalid nexthop")
 			continue
@@ -219,92 +212,6 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 					LocalAddress: m.getLocalAddress().String(),
 					MtuDiscovery: true,
 				},
-				// ApplyPolicy: &apipb.ApplyPolicy{
-				// 	ImportPolicy: &apipb.PolicyAssignment{
-				// 		DefaultAction: apipb.RouteAction_REJECT,
-				// 		Policies: []*apipb.Policy{
-				// 			{
-				// 				Statements: []*apipb.Statement{
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							PrefixSet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpPrefixName_Reserved,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_REJECT,
-				// 						},
-				// 					},
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							CommunitySet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpCommunityName_WireGuardPeer,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_REJECT,
-				// 						},
-				// 					},
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							CommunitySet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpCommunityName_GenericPeer,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_ACCEPT,
-				// 						},
-				// 					},
-				// 				},
-				// 			},
-				// 		},
-				// 	},
-				// 	ExportPolicy: &apipb.PolicyAssignment{
-				// 		DefaultAction: apipb.RouteAction_REJECT,
-				// 		Policies: []*apipb.Policy{
-				// 			{
-				// 				Statements: []*apipb.Statement{
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							PrefixSet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpPrefixName_Reserved,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_REJECT,
-				// 						},
-				// 					},
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							CommunitySet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpCommunityName_WireGuardPeer,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_REJECT,
-				// 						},
-				// 					},
-				// 					{
-				// 						Conditions: &apipb.Conditions{
-				// 							CommunitySet: &apipb.MatchSet{
-				// 								Type: apipb.MatchSet_ANY,
-				// 								Name: _bgpCommunityName_GenericPeer,
-				// 							},
-				// 						},
-				// 						Actions: &apipb.Actions{
-				// 							RouteAction: apipb.RouteAction_ACCEPT,
-				// 						},
-				// 					},
-				// 				},
-				// 			},
-				// 		},
-				// 	},
-				// },
 			},
 		})
 		if err != nil {
@@ -355,11 +262,6 @@ func (m *Manager) handleGenericPeerEvents(resp *apipb.WatchEventResponse) {
 			p.Family.Safi != apipb.Family_SAFI_UNICAST {
 			continue
 		}
-
-		// if !p.Best {
-		// 	glog.V(5).Infof("handle wireguard peer event dropped by not best")
-		// 	continue
-		// }
 
 		if p.IsNexthopInvalid {
 			glog.V(5).Infof("handle wireguard peer event dropped by invalid nexthop")
