@@ -259,8 +259,11 @@ func (m *Manager) startIpipInterface() error {
 		}
 	}
 
+	// Set TTL will let PMTUD on, but it may not work in some times, so we need to clamp MSS using iptables.
+	// Refer: https://man7.org/linux/man-pages/man8/ip-tunnel.8.html
+	//        https://github.com/torvalds/linux/blob/a0e3919a2df29b373b19a8fbd6e4c4c38fc10d87/net/ipv4/ip_tunnel_core.c#L1152
 	err = netlink.LinkAdd(&netlink.Iptun{
-		Ttl:   1,
+		Ttl:   1, // avoid loop and packet leak
 		Local: net.IP(m.getLocalAddress().AsSlice()),
 		LinkAttrs: netlink.LinkAttrs{
 			Name:  m.getIpipInterfaceName(),
@@ -280,30 +283,10 @@ func (m *Manager) startIpipInterface() error {
 		return fmt.Errorf("new iptables: %w", err)
 	}
 
-	ok, err := ipt.ChainExists("mangle", "DMWG")
-	if err != nil {
-		return fmt.Errorf("check chain exist: %w", err)
-	}
-	if ok {
-		err = ipt.ClearChain("mangle", "DMWG")
-		if err != nil {
-			return fmt.Errorf("clear chain: %w", err)
-		}
-	} else {
-		err = ipt.NewChain("mangle", "DMWG")
-		if err != nil {
-			return fmt.Errorf("new chain: %w", err)
-		}
-	}
-
-	// iptables -t mangle -I FORWARD 1 -i <ipip_tunnel> -j DMWG
-	err = ipt.InsertUnique("mangle", "FORWARD", 1, "-i", m.getIpipInterfaceName(), "-j", "DMWG")
-	if err != nil {
-		return fmt.Errorf("insert forward rule: %w", err)
-	}
-
-	// iptables -t mangle -A DMWG -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <_tcpMss>
-	err = ipt.AppendUnique("mangle", "DMWG",
+	// Clamp MSS at PREROUTING chain, or it will override by the PMTUD.
+	// iptables -t mangle -I PREROUTING 1 -i <ip_tunnel> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <_tcpMss>
+	err = ipt.InsertUnique("mangle", "PREROUTING", 1,
+		"-i", m.getIpipInterfaceName(),
 		"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
 		"-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", _tcpMss),
 	)
