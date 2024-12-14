@@ -1,11 +1,13 @@
 package manager
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
 
 	apipb "github.com/osrg/gobgp/v3/api"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -120,4 +122,47 @@ func getNexthop(attrs []*anypb.Any) (netip.Addr, error) {
 	}
 
 	return netip.Addr{}, fmt.Errorf("missing nexthop attribute")
+}
+
+func getWireGuardProperties(attrs []*anypb.Any) (endpointPort uint16, publicKey wgtypes.Key, err error) {
+	var wireGuardPeerAttr *apipb.WireGuardPeerAttribute
+	for _, attr := range attrs {
+		if attr.MessageIs(&apipb.WireGuardPeerAttribute{}) {
+			a := &apipb.WireGuardPeerAttribute{}
+			err = attr.UnmarshalTo(a)
+			if err != nil {
+				err = fmt.Errorf("unmarshal wireguard peer attribute: %w", err)
+				return
+			}
+
+			wireGuardPeerAttr = a
+		}
+	}
+	if wireGuardPeerAttr == nil {
+		err = fmt.Errorf("missing wireguard peer attribute")
+		return
+	}
+
+	b, err := base64.StdEncoding.DecodeString(wireGuardPeerAttr.PublicKey)
+	if err != nil {
+		err = fmt.Errorf("decode public key: %w", err)
+		return
+	}
+	if len(b) != 32 {
+		err = fmt.Errorf("invalid public key: %s", wireGuardPeerAttr.PublicKey)
+		return
+	}
+
+	pk, err := wgtypes.NewKey(b)
+	if err != nil {
+		err = fmt.Errorf("new key: %w", err)
+		return
+	}
+
+	if wireGuardPeerAttr.EndpointPort == 0 || wireGuardPeerAttr.EndpointPort > 0xffff {
+		err = fmt.Errorf("missing port attribute")
+		return
+	}
+
+	return uint16(wireGuardPeerAttr.EndpointPort), pk, nil
 }
