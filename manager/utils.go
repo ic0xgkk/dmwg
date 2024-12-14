@@ -18,8 +18,12 @@ func (m *Manager) getLocalAddress() netip.Addr {
 	return netip.AddrFrom4(a)
 }
 
-func (m *Manager) getInterfaceName() string {
+func (m *Manager) getWireGuardInterfaceName() string {
 	return "wg-" + hex.EncodeToString(m.networkId[:])
+}
+
+func (m *Manager) getIpipInterfaceName() string {
+	return "tl-" + hex.EncodeToString(m.networkId[:])
 }
 
 // All the BGP peer will use the same TimersConfig.

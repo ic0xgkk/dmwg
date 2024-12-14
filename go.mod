@@ -3,6 +3,7 @@ module github.com/ic0xgkk/dmwg
 go 1.22.7
 
 require (
+	github.com/coreos/go-iptables v0.8.0
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/golang/glog v1.2.3
 	github.com/osrg/gobgp/v3 v3.32.0

@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"runtime"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/golang/glog"
 	apipb "github.com/osrg/gobgp/v3/api"
+	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // Ensure that there are no peers added to bgp before watching.
-func (m *Manager) watchWireGuardPeers() error {
+func (m *Manager) watchWireGuardPeer() error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -37,25 +37,25 @@ func (m *Manager) watchWireGuardPeers() error {
 				},
 			},
 		},
-	}, m.handleWireGuardPeerEvents)
+	}, m.handleWireGuardPeerEvent)
 	if err != nil {
-		return fmt.Errorf("watch wireguard peers: %w", err)
+		return fmt.Errorf("watch wireguard peer: %w", err)
 	}
 
 	return nil
 }
 
-func (m *Manager) handleWireGuardPeerEvents(resp *apipb.WatchEventResponse) {
+func (m *Manager) handleWireGuardPeerEvent(resp *apipb.WatchEventResponse) {
 	m.wait.Add(1)
 	defer m.wait.Done()
 
 	if glog.V(5) {
-		glog.V(5).Infof("handle wireguard peer events: %s", spew.Sdump(resp))
+		glog.V(5).Infof("handle wireguard peer event: %s", spew.Sdump(resp))
 	}
 
 	e, ok := resp.Event.(*apipb.WatchEventResponse_Table)
 	if !ok {
-		glog.V(5).Infof("handle wireguard peer event dropped by not table event")
+		glog.V(5).Infof("dropped wireguard peer event: not table event")
 		return
 	}
 
@@ -63,28 +63,28 @@ func (m *Manager) handleWireGuardPeerEvents(resp *apipb.WatchEventResponse) {
 		if p.Family.Afi != apipb.Family_AFI_IP ||
 			p.Family.Safi != apipb.Family_SAFI_UNICAST {
 
-			glog.V(3).Infof("handle wireguard peer event dropped by family not IPv4 Unicast")
+			glog.V(5).Infof("dropped wireguard peer event: not IPv4 Unicast")
 			continue
 		}
 
 		if p.IsNexthopInvalid {
-			glog.V(5).Infof("handle wireguard peer event dropped by invalid nexthop")
+			glog.V(5).Infof("dropped wireguard peer event: invalid nexthop")
 			continue
 		}
 
 		has, err := hasCommunities([]uint32{_bgpCommunity_WireGuardPeer}, p.Pattrs)
 		if err != nil {
-			glog.Errorf("check has wireguard peer community: %v", err)
+			glog.Errorf("failed to check if has wireguard peer community: %v", err)
 			continue
 		}
 		if !has {
-			glog.V(5).Infof("handle wireguard peer event dropped by no wireguard peer community")
+			glog.V(5).Infof("dropped wireguard peer event: no wireguard peer community")
 			continue
 		}
 
 		err = m.handleWireGuardPeerEventPath(p)
 		if err != nil {
-			glog.Errorf("handle wireguard peer event path: %v", err)
+			glog.Errorf("failed to handle wireguard peer event path: %v", err)
 		}
 	}
 }
@@ -94,28 +94,37 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 		glog.V(5).Infof("handle wireguard peer event path: %s", spew.Sdump(p))
 	}
 
-	ipPrefix := new(apipb.IPAddressPrefix)
-	err := p.Nlri.UnmarshalTo(ipPrefix)
-	if err != nil {
-		return fmt.Errorf("unmarshal nlri: %w", err)
-	}
-	if ipPrefix.PrefixLen != 32 {
-		return fmt.Errorf("invalid wireguard peer prefix length: %d", ipPrefix.PrefixLen)
-	}
+	var prefix netip.Prefix
+	{
+		pfx := new(apipb.IPAddressPrefix)
+		err := p.Nlri.UnmarshalTo(pfx)
+		if err != nil {
+			return fmt.Errorf("unmarshal nlri: %w", err)
+		}
 
-	// Ignore the path if the prefix is the local address.
-	ipPrefixAddr, err := netip.ParseAddr(ipPrefix.Prefix)
-	if err != nil {
-		return fmt.Errorf("parse nlri address: %w", err)
+		addr, err := netip.ParseAddr(pfx.Prefix)
+		if err != nil {
+			return fmt.Errorf("parse nlri address: %w", err)
+		}
+		if pfx.PrefixLen != 32 || !addr.Is4() {
+			return fmt.Errorf("invalid wireguard peer prefix: not ipv4 host route: %s/%d", pfx.Prefix, pfx.PrefixLen)
+		}
+
+		prefix = netip.PrefixFrom(addr, int(pfx.PrefixLen))
 	}
-	if ipPrefixAddr.Compare(m.getLocalAddress()) == 0 {
-		glog.V(5).Infof("handle wireguard peer event path dropped by local address")
+	// Ignore the path if the prefix is the local address.
+	if prefix.Addr().Compare(m.getLocalAddress()) == 0 {
+		glog.V(5).Infof("dropped wireguard peer event path: local address")
 		return nil
 	}
 
 	nexthopAddress, err := getNexthop(p.Pattrs)
 	if err != nil {
 		return fmt.Errorf("get nexthop address: %w", err)
+	}
+	// WireGuard Peer endpoint is nexthop, only IPv6 is supported.
+	if !nexthopAddress.Is6() {
+		return fmt.Errorf("invalid nexthop address: not ipv6: %s", nexthopAddress)
 	}
 
 	var wireGuardPeerAttr *apipb.WireGuardPeerAttribute
@@ -147,7 +156,7 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 	}
 
 	if p.IsWithdraw {
-		err = m.wgClient.ConfigureDevice(m.getInterfaceName(), wgtypes.Config{
+		err = m.wgClient.ConfigureDevice(m.getWireGuardInterfaceName(), wgtypes.Config{
 			Peers: []wgtypes.PeerConfig{
 				{
 					PublicKey: publicKey,
@@ -156,19 +165,19 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("configure device to withdraw peer: %w", err)
+			return fmt.Errorf("withdraw wireguard peer: %w", err)
 		}
 
 		err = m.bgpServer.DeletePeer(context.Background(), &apipb.DeletePeerRequest{
-			Address: ipPrefixAddr.String(),
+			Address: prefix.Addr().String(),
 		})
 		if err != nil {
-			return fmt.Errorf("delete peer: %w", err)
+			return fmt.Errorf("delete bgp peer: %w", err)
 		}
 
 	} else {
-		a := ipPrefixAddr.As4()
-		err = m.wgClient.ConfigureDevice(m.getInterfaceName(), wgtypes.Config{
+		a := prefix.Addr().As4()
+		err = m.wgClient.ConfigureDevice(m.getWireGuardInterfaceName(), wgtypes.Config{
 			Peers: []wgtypes.PeerConfig{
 				{
 					PublicKey: publicKey,
@@ -186,7 +195,7 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("configure device to add peer: %w", err)
+			return fmt.Errorf("add wireguard peer: %w", err)
 		}
 
 		err = m.bgpServer.AddPeer(context.Background(), &apipb.AddPeerRequest{
@@ -200,7 +209,7 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 					},
 				},
 				Conf: &apipb.PeerConf{
-					NeighborAddress: ipPrefixAddr.String(),
+					NeighborAddress: prefix.Addr().String(),
 					PeerAsn:         _asn,
 					Type:            apipb.PeerType_INTERNAL,
 				},
@@ -210,19 +219,20 @@ func (m *Manager) handleWireGuardPeerEventPath(p *apipb.Path) error {
 				Transport: &apipb.Transport{
 					RemotePort:   179,
 					LocalAddress: m.getLocalAddress().String(),
-					MtuDiscovery: true,
+					TcpMss:       1220,
 				},
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("add wireguard peer: %w", err)
+			return fmt.Errorf("add bgp peer: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func (m *Manager) watchGenericPeers() error {
+// Ensure that there are no peers added to bgp before watching.
+func (m *Manager) watchGenericPreifx() error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -240,79 +250,114 @@ func (m *Manager) watchGenericPeers() error {
 				},
 			},
 		},
-	}, m.handleGenericPeerEvents)
+	}, m.handleGenericPrefixEvent)
 	if err != nil {
-		return fmt.Errorf("watch generic peers: %w", err)
+		return fmt.Errorf("watch generic prefix: %w", err)
 	}
 
 	return nil
 }
 
-func (m *Manager) handleGenericPeerEvents(resp *apipb.WatchEventResponse) {
+func (m *Manager) handleGenericPrefixEvent(resp *apipb.WatchEventResponse) {
 	m.wait.Add(1)
 	defer m.wait.Done()
 
+	if glog.V(5) {
+		glog.V(5).Infof("handle generic prefix event: %s", spew.Sdump(resp))
+	}
+
 	e, ok := resp.Event.(*apipb.WatchEventResponse_Table)
 	if !ok {
+		glog.V(5).Infof("dropped generic prefix event: not table event")
 		return
 	}
 
 	for _, p := range e.Table.Paths {
 		if p.Family.Afi != apipb.Family_AFI_IP ||
 			p.Family.Safi != apipb.Family_SAFI_UNICAST {
+
+			glog.V(5).Infof("dropped generic prefix event: not IPv4 Unicast")
 			continue
 		}
 
 		if p.IsNexthopInvalid {
-			glog.V(5).Infof("handle wireguard peer event dropped by invalid nexthop")
+			glog.V(5).Infof("dropped generic prefix event: invalid nexthop")
 			continue
 		}
 
-		err := m.handleGenericPeerEventPath(p)
+		has, err := hasCommunities([]uint32{_bgpCommunity_GenericPrefix}, p.Pattrs)
 		if err != nil {
-			glog.Errorf("handle generic peer event path: %v", err)
+			glog.Errorf("failed to check if has generic prefix community: %v", err)
+			continue
+		}
+		if !has {
+			glog.V(5).Infof("dropped generic prefix event: no generic prefix community")
+			continue
+		}
+
+		err = m.handleGenericPrefixEventPath(p)
+		if err != nil {
+			glog.Errorf("failed to handle generic prefix event path: %v", err)
 		}
 	}
 }
 
-func (m *Manager) handleGenericPeerEventPath(p *apipb.Path) error {
-	ipPrefix := new(apipb.IPAddressPrefix)
-	err := p.Nlri.UnmarshalTo(ipPrefix)
-	if err != nil {
-		return fmt.Errorf("unmarshal nlri: %w", err)
-	}
-
-	var nexthopAttr *apipb.NextHopAttribute
-	for _, attr := range p.Pattrs {
-		if attr.MessageIs(&apipb.NextHopAttribute{}) {
-			a := &apipb.NextHopAttribute{}
-			err = attr.UnmarshalTo(a)
-			if err != nil {
-				return fmt.Errorf("unmarshal nexthop attribute: %w", err)
-			}
-
-			nexthopAttr = a
+func (m *Manager) handleGenericPrefixEventPath(p *apipb.Path) error {
+	var prefix netip.Prefix
+	{
+		pfx := new(apipb.IPAddressPrefix)
+		err := p.Nlri.UnmarshalTo(pfx)
+		if err != nil {
+			return fmt.Errorf("unmarshal nlri: %w", err)
 		}
-	}
-	if nexthopAttr == nil {
-		return fmt.Errorf("missing nexthop attribute")
+
+		addr, err := netip.ParseAddr(pfx.Prefix)
+		if err != nil {
+			return fmt.Errorf("parse nlri address: %w", err)
+		}
+		if pfx.PrefixLen > 32 || !addr.Is4() {
+			return fmt.Errorf("invalid generic prefix: not ipv4: %s/%d", pfx.Prefix, pfx.PrefixLen)
+		}
+
+		prefix = netip.PrefixFrom(addr, int(pfx.PrefixLen))
 	}
 
-	tunnelNexthopAddress, err := netip.ParseAddr(nexthopAttr.NextHop)
+	nexthopAddress, err := getNexthop(p.Pattrs)
 	if err != nil {
-		return fmt.Errorf("parse nexthop address: %s", nexthopAttr.NextHop)
+		return fmt.Errorf("get nexthop address: %w", err)
 	}
-	if !tunnelNexthopAddress.Is4() {
-		return fmt.Errorf("invalid nexthop address: not ipv4: %s", nexthopAttr.NextHop)
+	// Generic Prefix nexthop is IPIP destination, only IPv4 is supported.
+	if !nexthopAddress.Is4() {
+		return fmt.Errorf("invalid nexthop address: not ipv4: %s", nexthopAddress)
 	}
-	if tunnelNexthopAddress.Compare(m.getLocalAddress()) == 0 {
-		return nil
+
+	link, err := netlink.LinkByName(m.getIpipInterfaceName())
+	if err != nil {
+		return fmt.Errorf("get ipip link: %w", err)
+	}
+
+	route := &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Flags:     int(netlink.FLAG_ONLINK),
+		Dst: &net.IPNet{
+			IP:   net.IP(prefix.Addr().AsSlice()),
+			Mask: net.CIDRMask(int(prefix.Bits()), prefix.Addr().BitLen()),
+		},
+		Gw: nexthopAddress.AsSlice(),
 	}
 
 	if p.IsWithdraw {
-		runtime.KeepAlive(tunnelNexthopAddress)
+		err = netlink.RouteDel(route)
+		if err != nil {
+			return fmt.Errorf("del route: %w", err)
+		}
+
 	} else {
-		// netlink.RouteAdd(&netlink.Route{})
+		err = netlink.RouteAdd(route)
+		if err != nil {
+			return fmt.Errorf("add route: %w", err)
+		}
+
 	}
 
 	return nil

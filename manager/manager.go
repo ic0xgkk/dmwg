@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/ic0xgkk/dmwg/pkg/log"
 	apipb "github.com/osrg/gobgp/v3/api"
 	"github.com/osrg/gobgp/v3/pkg/server"
@@ -61,7 +62,7 @@ func (o *GrpcPortOption) optionInterface() {}
 
 // networkId is a 4-byte hexadecimal string, which is equivalent to 8 characters.
 // nodeId is a 2-byte hexadecimal string, which is equivalent to 4 characters.
-func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerPassword string, opts ...OptionInterface) (*Manager, error) {
+func New(networkId, nodeId string, controllerAddressPort netip.AddrPort, controllerPassword string, opts ...OptionInterface) (*Manager, error) {
 	networkIdBytes, err := hex.DecodeString(networkId)
 	if err != nil {
 		return nil, fmt.Errorf("decode network id: %w", err)
@@ -80,8 +81,8 @@ func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerP
 	}
 	defer runtime.KeepAlive(nodeIdBytes)
 
-	if !controllerAddress.Addr().Is6() {
-		return nil, fmt.Errorf("invalid controller address: not ipv6: %s", controllerAddress.Addr())
+	if !controllerAddressPort.Addr().Is6() {
+		return nil, fmt.Errorf("invalid controller address: not ipv6: %s", controllerAddressPort.Addr())
 	}
 
 	if len(controllerPassword) > 32 || len(controllerPassword) == 0 {
@@ -164,25 +165,31 @@ func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerP
 		return nil, fmt.Errorf("start wireguard interface: %w", err)
 	}
 
+	err = m.startIpipInterface()
+	if err != nil {
+		m.Close()
+		return nil, fmt.Errorf("start ipip interface: %w", err)
+	}
+
 	err = m.addLocalWireGuardPeer(wgPublicKey, wgPort)
 	if err != nil {
 		m.Close()
 		return nil, fmt.Errorf("add local wireguard peer: %w", err)
 	}
 
-	err = m.watchWireGuardPeers()
+	err = m.watchWireGuardPeer()
 	if err != nil {
 		m.Close()
-		return nil, fmt.Errorf("watch wireguard peers: %w", err)
+		return nil, fmt.Errorf("watch wireguard peer: %w", err)
 	}
 
-	err = m.watchGenericPeers()
+	err = m.watchGenericPreifx()
 	if err != nil {
 		m.Close()
-		return nil, fmt.Errorf("watch generic peers: %w", err)
+		return nil, fmt.Errorf("watch generic prefix: %w", err)
 	}
 
-	err = m.addControllerPeer(controllerAddress.Addr(), controllerAddress.Port(), controllerPassword)
+	err = m.addControllerPeer(controllerAddressPort.Addr(), controllerAddressPort.Port(), controllerPassword)
 	if err != nil {
 		m.Close()
 		return nil, fmt.Errorf("start controller peer: %w", err)
@@ -193,18 +200,18 @@ func New(networkId, nodeId string, controllerAddress netip.AddrPort, controllerP
 
 func (m *Manager) startWireGuardInterface(privateKey wgtypes.Key, port uint16) error {
 	// If a WireGuard interface already exists, delete it and recreate it.
-	link, err := netlink.LinkByName(m.getInterfaceName())
+	link, err := netlink.LinkByName(m.getWireGuardInterfaceName())
 	if err == nil {
 		if link.Type() == "wireguard" {
 			netlink.LinkDel(link)
 		} else {
-			return fmt.Errorf("interface exists but not wireguard: %s", m.getInterfaceName())
+			return fmt.Errorf("interface exists but not wireguard: %s", m.getWireGuardInterfaceName())
 		}
 	}
 
 	err = netlink.LinkAdd(&netlink.Wireguard{
 		LinkAttrs: netlink.LinkAttrs{
-			Name:  m.getInterfaceName(),
+			Name:  m.getWireGuardInterfaceName(),
 			MTU:   _wgMtu,
 			Flags: net.FlagUp,
 		},
@@ -213,13 +220,13 @@ func (m *Manager) startWireGuardInterface(privateKey wgtypes.Key, port uint16) e
 		return fmt.Errorf("add wireguard interface: %w", err)
 	}
 
-	link, err = netlink.LinkByName(m.getInterfaceName())
+	link, err = netlink.LinkByName(m.getWireGuardInterfaceName())
 	if err != nil {
 		return fmt.Errorf("get wireguard interface: %w", err)
 	}
 
 	p := int(port)
-	err = m.wgClient.ConfigureDevice(m.getInterfaceName(), wgtypes.Config{
+	err = m.wgClient.ConfigureDevice(m.getWireGuardInterfaceName(), wgtypes.Config{
 		PrivateKey:   &privateKey,
 		ListenPort:   &p,
 		ReplacePeers: true,
@@ -237,6 +244,71 @@ func (m *Manager) startWireGuardInterface(privateKey wgtypes.Key, port uint16) e
 	})
 	if err != nil {
 		return fmt.Errorf("add address to wireguard interface: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) startIpipInterface() error {
+	link, err := netlink.LinkByName(m.getIpipInterfaceName())
+	if err == nil {
+		if link.Type() == "ipip" {
+			netlink.LinkDel(link)
+		} else {
+			return fmt.Errorf("interface exists but not ipip: %s", m.getIpipInterfaceName())
+		}
+	}
+
+	err = netlink.LinkAdd(&netlink.Iptun{
+		Ttl:   1,
+		Local: net.IP(m.getLocalAddress().AsSlice()),
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  m.getIpipInterfaceName(),
+			MTU:   _ipipMtu,
+			Flags: net.FlagUp,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("add ipip interface: %w", err)
+	}
+
+	ipt, err := iptables.New(
+		iptables.IPFamily(iptables.ProtocolIPv4),
+		iptables.Timeout(30),
+	)
+	if err != nil {
+		return fmt.Errorf("new iptables: %w", err)
+	}
+
+	ok, err := ipt.ChainExists("mangle", "DMWG")
+	if err != nil {
+		return fmt.Errorf("check chain exist: %w", err)
+	}
+	if ok {
+		err = ipt.ClearChain("mangle", "DMWG")
+		if err != nil {
+			return fmt.Errorf("clear chain: %w", err)
+		}
+	} else {
+		err = ipt.NewChain("mangle", "DMWG")
+		if err != nil {
+			return fmt.Errorf("new chain: %w", err)
+		}
+	}
+
+	// iptables -t mangle -I FORWARD 1 -i <ipip_tunnel> -j DMWG
+	err = ipt.InsertUnique("mangle", "FORWARD", 1, "-i", m.getIpipInterfaceName(), "-j", "DMWG")
+	if err != nil {
+		return fmt.Errorf("insert forward rule: %w", err)
+	}
+
+	// iptables -t mangle -A DMWG -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <_tcpMss>
+	err = ipt.AppendUnique("mangle", "DMWG",
+		"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+		"-j", "TCPMSS", "--set-mss", fmt.Sprintf("%d", _tcpMss),
+	)
+	if err != nil {
+		return fmt.Errorf("add clamp mss rule: %w", err)
 	}
 
 	return nil
@@ -278,8 +350,8 @@ func (m *Manager) addControllerPeer(addr netip.Addr, port uint16, password strin
 				Config: m.getBgpTimersConfig(),
 			},
 			Transport: &apipb.Transport{
-				RemotePort:   uint32(port),
-				MtuDiscovery: true,
+				RemotePort: uint32(port),
+				TcpMss:     1220,
 			},
 		},
 	})
@@ -326,7 +398,6 @@ func (m *Manager) addLocalWireGuardPeer(publicKey wgtypes.Key, port uint16) erro
 			},
 			Nlri:   nlri,
 			Pattrs: attrs,
-			Best:   true,
 		},
 	})
 	if err != nil {
@@ -336,6 +407,57 @@ func (m *Manager) addLocalWireGuardPeer(publicKey wgtypes.Key, port uint16) erro
 	return nil
 }
 
+// Only support IPv4.
+func (m *Manager) addLocalGenericPrefix(prefix netip.Prefix) error {
+	if !prefix.Addr().Is4() {
+		return fmt.Errorf("invalid generic prefix: not ipv4: %s", prefix)
+	}
+
+	nlri, _ := anypb.New(&apipb.IPAddressPrefix{
+		Prefix:    prefix.Addr().String(),
+		PrefixLen: uint32(prefix.Bits()),
+	})
+
+	a1, _ := anypb.New(&apipb.OriginAttribute{
+		Origin: uint32(0), // IGP
+	})
+
+	a2, _ := anypb.New(&apipb.NextHopAttribute{
+		NextHop: m.getLocalAddress().String(),
+	})
+
+	a3, _ := anypb.New(&apipb.CommunitiesAttribute{
+		Communities: []uint32{_bgpCommunity_GenericPrefix},
+	})
+
+	attrs := []*anypb.Any{a1, a2, a3}
+
+	_, err := m.bgpServer.AddPath(context.Background(), &apipb.AddPathRequest{
+		TableType: apipb.TableType_GLOBAL,
+		Path: &apipb.Path{
+			Family: &apipb.Family{
+				Afi:  apipb.Family_AFI_IP,
+				Safi: apipb.Family_SAFI_UNICAST,
+			},
+			Nlri:   nlri,
+			Pattrs: attrs,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("add generic prefix path: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) AddLocalGenericPrefix(pfx netip.Prefix) error {
+	if pfx.Overlaps(_reservedPrefix) {
+		return fmt.Errorf("invalid generic prefix: overlaps reserved prefix: %s", pfx)
+	}
+
+	return m.addLocalGenericPrefix(pfx)
+}
+
 // This will immediately close all BGP sessions and gRPC connections.
 func (m *Manager) Close() {
 	m.closeOnce.Do(func() {
@@ -343,6 +465,16 @@ func (m *Manager) Close() {
 
 		m.bgpServer.Stop()
 		m.wgClient.Close()
+
+		link, err := netlink.LinkByName(m.getWireGuardInterfaceName())
+		if err == nil {
+			netlink.LinkDel(link)
+		}
+
+		link, err = netlink.LinkByName(m.getIpipInterfaceName())
+		if err == nil {
+			netlink.LinkDel(link)
+		}
 	})
 
 	m.wait.Wait()
